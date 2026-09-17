@@ -105,6 +105,7 @@ class AddSeriesDialog(QDialog):
         self.id_edit.setPlaceholderText("41893")
         self.id_edit.setFixedHeight(38)
         self.id_edit.setMaximumWidth(200)
+        self.id_edit.textChanged.connect(self._on_id_changed)
         root.addWidget(self.id_edit, alignment=Qt.AlignmentFlag.AlignLeft)
 
         # ---- Подсказка ----
@@ -156,28 +157,69 @@ class AddSeriesDialog(QDialog):
 
         root.addLayout(btns)
 
+        # Первая проверка состояния кнопки
+        self._update_add_button_state()
+
     # ============================================================
-    # Обработчики
+    # Обработчики полей
     # ============================================================
 
     def _on_url_changed(self, text: str):
-        """Автоматически парсит ID из ссылки."""
+        """
+        Пользователь меняет поле ссылки.
+        Пытаемся распарсить ID и подставить его в поле ID.
+        """
         text = text.strip()
+
+        # Если поле пустое — ничего не делаем, просто обновляем кнопку
         if not text:
-            self.add_btn.setEnabled(bool(self.id_edit.text().strip()))
+            self._update_add_button_state()
             return
 
+        # Пытаемся извлечь ID
         sid = parse_series_id(text)
-        if sid:
-            self.id_edit.setText(str(sid))
+        if sid is not None:
+            # Автоподстановка в ID (без рекурсивного триггера)
+            if self.id_edit.text().strip() != str(sid):
+                self.id_edit.blockSignals(True)
+                self.id_edit.setText(str(sid))
+                self.id_edit.blockSignals(False)
             self._set_status("")
-        # Если не удалось — не стираем ID (пользователь мог ввести его вручную)
+        else:
+            # Не удалось распарсить — но не стираем ID (пользователь мог ввести вручную)
+            self._set_status("")
+
+        self._update_add_button_state()
+
+    def _on_id_changed(self, text: str):
+        """
+        Пользователь меняет поле ID.
+        Просто обновляем состояние кнопки.
+        """
+        self._update_add_button_state()
+
+    def _update_add_button_state(self):
+        """
+        Включает/выключает кнопку «Добавить в библиотеку».
+        Кнопка активна, если в поле ID — валидное положительное число.
+        """
+        sid_str = self.id_edit.text().strip()
+
+        # Простая валидация: непусто и всё цифры
+        is_valid = bool(sid_str) and sid_str.isdigit() and int(sid_str) > 0
+
+        self.add_btn.setEnabled(is_valid)
+
+    # ============================================================
+    # Основное действие
+    # ============================================================
 
     def _on_add_clicked(self):
         sid_str = self.id_edit.text().strip()
-        if not sid_str.isdigit():
+
+        if not sid_str.isdigit() or int(sid_str) <= 0:
             self._set_status(
-                i18n.tr("add_series.invalid_url"), error=True
+                i18n.tr("add_series.invalid_url"), error=True,
             )
             return
 
@@ -202,6 +244,8 @@ class AddSeriesDialog(QDialog):
         self._set_status("Загрузка метаданных…")
         self.add_btn.setEnabled(False)
         self.cancel_btn.setEnabled(False)
+        self.url_edit.setEnabled(False)
+        self.id_edit.setEnabled(False)
 
         self._worker = LoadSeriesWorker(self.api, sid, parent=self)
         self._worker.loaded.connect(self._on_loaded)
@@ -211,8 +255,10 @@ class AddSeriesDialog(QDialog):
         self._worker.start()
 
     def _on_worker_finished(self):
-        self.add_btn.setEnabled(True)
+        self.url_edit.setEnabled(True)
+        self.id_edit.setEnabled(True)
         self.cancel_btn.setEnabled(True)
+        self._update_add_button_state()
 
     # ============================================================
     # Результаты загрузки
