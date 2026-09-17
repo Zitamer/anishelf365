@@ -1,0 +1,46 @@
+# AniShelf365 gitignore
+
+# Private user data
+data/
+token.json
+config.json
+library.db
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.env
+.env.*
+
+# PyInstaller
+*.spec
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local tests
+test_*.py
+*_test.py
