@@ -103,6 +103,16 @@ CREATE TABLE IF NOT EXISTS settings (
     key     TEXT PRIMARY KEY,
     value   TEXT
 );
+
+-- ============================================================
+-- Игнорируемые сериалы
+-- ============================================================
+CREATE TABLE IF NOT EXISTS ignored_series (
+    series_id   INTEGER PRIMARY KEY,
+    title       TEXT,
+    reason      TEXT,
+    added_at    DATETIME
+);
 """
 
 
@@ -118,7 +128,17 @@ class Database:
                 os.makedirs(dir_name, exist_ok=True)
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+
+        # Включаем каскадное удаление (per-connection)
+        self.conn.execute("PRAGMA foreign_keys = ON")
+
         self.conn.executescript(SCHEMA)
+
+        # executescript может сбросить PRAGMA — устанавливаем ещё раз
+        self.conn.execute("PRAGMA foreign_keys = ON")
+        self.conn.commit()
+
+        # Миграции
         self._migrate()
 
     def _migrate(self):
@@ -232,12 +252,15 @@ class Database:
         return cur.fetchone()
 
     def list_series(self):
-        cur = self.conn.execute("SELECT * FROM series_meta ORDER BY title COLLATE NOCASE")
+        cur = self.conn.execute(
+            "SELECT * FROM series_meta ORDER BY title COLLATE NOCASE"
+        )
         return cur.fetchall()
 
     def list_airing_series(self):
         cur = self.conn.execute(
-            "SELECT * FROM series_meta WHERE is_airing = 1 ORDER BY title COLLATE NOCASE"
+            "SELECT * FROM series_meta WHERE is_airing = 1 "
+            "ORDER BY title COLLATE NOCASE"
         )
         return cur.fetchall()
 
@@ -263,6 +286,7 @@ class Database:
         self.conn.commit()
 
     def delete_series(self, series_id: int):
+        """Удаляет сериал и все связанные данные (каскадно)."""
         self.conn.execute("DELETE FROM series_meta WHERE series_id = ?", (series_id,))
         self.conn.commit()
 
@@ -356,7 +380,8 @@ class Database:
 
     def list_episodes_by_type(self, series_id: int, episode_type: str):
         cur = self.conn.execute(
-            "SELECT * FROM episodes_meta WHERE series_id = ? AND episode_type = ? ORDER BY number",
+            "SELECT * FROM episodes_meta "
+            "WHERE series_id = ? AND episode_type = ? ORDER BY number",
             (series_id, episode_type),
         )
         return cur.fetchall()
@@ -375,7 +400,7 @@ class Database:
         subtitle_path: str = None,
         author: str = None,
         translation_type: str = None,
-        translation_lang: str = None,   # НОВОЕ
+        translation_lang: str = None,
         quality: str = None,
         file_size: int = 0,
     ):
@@ -492,12 +517,14 @@ class Database:
         existing = self.get_progress(episode_id)
         if existing:
             self.conn.execute(
-                "UPDATE watch_progress SET watched = ?, last_watched = ? WHERE episode_id = ?",
+                "UPDATE watch_progress SET watched = ?, last_watched = ? "
+                "WHERE episode_id = ?",
                 (1 if watched else 0, _now(), episode_id),
             )
         else:
             self.conn.execute(
-                "INSERT INTO watch_progress (episode_id, position, duration, watched, last_watched) "
+                "INSERT INTO watch_progress "
+                "(episode_id, position, duration, watched, last_watched) "
                 "VALUES (?, 0, 0, ?, ?)",
                 (episode_id, 1 if watched else 0, _now()),
             )
@@ -534,67 +561,53 @@ class Database:
         return cur.fetchone()
 
     # ============================================================
+    # Ignored series
+    # ============================================================
+
+    def add_ignored(self, series_id: int, title: str = None, reason: str = None):
+        """Добавляет сериал в список игнорирования."""
+        self.conn.execute(
+            """
+            INSERT INTO ignored_series(series_id, title, reason, added_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(series_id) DO UPDATE SET
+                title = excluded.title,
+                reason = excluded.reason,
+                added_at = excluded.added_at
+            """,
+            (series_id, title, reason, _now()),
+        )
+        self.conn.commit()
+
+    def remove_ignored(self, series_id: int):
+        """Убирает сериал из списка игнорирования."""
+        self.conn.execute(
+            "DELETE FROM ignored_series WHERE series_id = ?", (series_id,)
+        )
+        self.conn.commit()
+
+    def is_ignored(self, series_id: int) -> bool:
+        """Проверяет, находится ли сериал в списке игнорирования."""
+        cur = self.conn.execute(
+            "SELECT 1 FROM ignored_series WHERE series_id = ? LIMIT 1",
+            (series_id,),
+        )
+        return cur.fetchone() is not None
+
+    def list_ignored(self):
+        """Возвращает список игнорируемых сериалов."""
+        cur = self.conn.execute(
+            "SELECT * FROM ignored_series ORDER BY added_at DESC"
+        )
+        return cur.fetchall()
+
+    def count_ignored(self) -> int:
+        cur = self.conn.execute("SELECT COUNT(*) AS cnt FROM ignored_series")
+        return cur.fetchone()["cnt"]
+
+    # ============================================================
     # Служебное
     # ============================================================
 
     def close(self):
         self.conn.close()
-
-
-if __name__ == "__main__":
-    db = Database(":memory:")
-    print("Схема создана успешно.")
-
-    db.set_setting("test_key", "test_value")
-    print("Setting:", db.get_setting("test_key"))
-
-    db.upsert_series({
-        "id": 41893,
-        "title": "Табакошка / Yani Neko",
-        "titles": {"ru": "Табакошка", "romaji": "Yani Neko", "en": "Chainsmoker Cat"},
-        "year": 2026,
-        "season": "Лето 2026",
-        "type": "tv",
-        "isAiring": 1,
-        "url": "https://smotret-anime.org/catalog/yani-neko-41893",
-        "posterUrl": "https://example.com/poster.jpg",
-        "genres": [{"title": "Комедия"}, {"title": "Сейнен"}],
-        "descriptions": [{"value": "Описание..."}],
-        "episodes": [{"id": 380000, "seriesId": 41893, "episodeInt": 1, "episodeType": "tv"}],
-    })
-    row = db.get_series(41893)
-    print("Series:", row["title"], "| is_airing:", row["is_airing"])
-
-    db.upsert_episode({
-        "id": 380000, "seriesId": 41893, "episodeInt": 1,
-        "episodeType": "tv", "episodeTitle": "Пилот",
-    })
-    db.upsert_episode({
-        "id": 380001, "seriesId": 41893, "episodeInt": 1.5,
-        "episodeType": "tv",
-    })
-    eps = db.list_episodes(41893)
-    print("Episodes:", [(e["number"], e["title"]) for e in eps])
-
-    db.add_local_file(
-        series_id=41893, episode_id=380000, episode_number=1,
-        translation_id=5931743, relative_path="41893/380000_5931743.mp4",
-        subtitle_path="41893/380000_5931743.ass",
-        author="Sanae", translation_type="sub", quality="1080p",
-        file_size=1234567,
-    )
-    files = db.list_local_files(41893)
-    print("Files:", [(f["relative_path"], f["author"], f["quality"]) for f in files])
-
-    db.set_progress(380000, position=500.0, duration=1440.0)
-    prog = db.get_progress(380000)
-    print("Progress:", prog["position"], "/", prog["duration"], "watched:", prog["watched"])
-
-    db.set_watched(380000, True)
-    print("Watched count:", db.count_watched(41893))
-
-    first = db.first_unwatched(41893)
-    print("First unwatched:", first["number"] if first else None)
-
-    db.close()
-    print("\nВсе тесты прошли успешно.")

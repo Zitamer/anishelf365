@@ -19,14 +19,10 @@ from core.scanner import scan_series_files
 logger = logging.getLogger(__name__)
 
 
-# ============================================================
-# Фоновый поток загрузки метаданных
-# ============================================================
-
 class LoadSeriesWorker(QThread):
-    loaded = Signal(dict)          # data
-    not_found = Signal(int)        # series_id
-    failed = Signal(str)           # error
+    loaded = Signal(dict)
+    not_found = Signal(int)
+    failed = Signal(str)
 
     def __init__(self, api: Anime365API, series_id: int, parent=None):
         super().__init__(parent)
@@ -46,10 +42,6 @@ class LoadSeriesWorker(QThread):
             self.failed.emit(str(e))
 
 
-# ============================================================
-# Диалог
-# ============================================================
-
 class AddSeriesDialog(QDialog):
     """Окно добавления тайтла в библиотеку."""
 
@@ -64,10 +56,6 @@ class AddSeriesDialog(QDialog):
 
         self._build_ui()
 
-    # ============================================================
-    # Разметка
-    # ============================================================
-
     def _build_ui(self):
         self.setWindowTitle(i18n.tr("add_series.title"))
         self.setModal(True)
@@ -78,12 +66,11 @@ class AddSeriesDialog(QDialog):
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(14)
 
-        # Заголовок
         title = QLabel(i18n.tr("add_series.title"))
         title.setStyleSheet("font-size: 20px; font-weight: bold;")
         root.addWidget(title)
 
-        # ---- Поле: ссылка ----
+        # Ссылка
         url_label = QLabel(i18n.tr("add_series.url_label"))
         url_label.setStyleSheet("font-weight: bold;")
         root.addWidget(url_label)
@@ -96,7 +83,7 @@ class AddSeriesDialog(QDialog):
         self.url_edit.textChanged.connect(self._on_url_changed)
         root.addWidget(self.url_edit)
 
-        # ---- Поле: ID ----
+        # ID
         id_label = QLabel(i18n.tr("add_series.id_label"))
         id_label.setStyleSheet("font-weight: bold;")
         root.addWidget(id_label)
@@ -108,7 +95,7 @@ class AddSeriesDialog(QDialog):
         self.id_edit.textChanged.connect(self._on_id_changed)
         root.addWidget(self.id_edit, alignment=Qt.AlignmentFlag.AlignLeft)
 
-        # ---- Подсказка ----
+        # Подсказка
         hint_frame = QFrame()
         hint_frame.setObjectName("card")
         hint_frame.setStyleSheet(
@@ -128,7 +115,7 @@ class AddSeriesDialog(QDialog):
         hint_layout.addWidget(hint)
         root.addWidget(hint_frame)
 
-        # ---- Статус ----
+        # Статус
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
         self.status_label.setStyleSheet("font-size: 12px;")
@@ -136,7 +123,7 @@ class AddSeriesDialog(QDialog):
 
         root.addStretch()
 
-        # ---- Кнопки ----
+        # Кнопки
         btns = QHBoxLayout()
         btns.setSpacing(10)
         btns.addStretch()
@@ -157,62 +144,33 @@ class AddSeriesDialog(QDialog):
 
         root.addLayout(btns)
 
-        # Первая проверка состояния кнопки
         self._update_add_button_state()
 
-    # ============================================================
-    # Обработчики полей
-    # ============================================================
-
     def _on_url_changed(self, text: str):
-        """
-        Пользователь меняет поле ссылки.
-        Пытаемся распарсить ID и подставить его в поле ID.
-        """
         text = text.strip()
-
-        # Если поле пустое — ничего не делаем, просто обновляем кнопку
         if not text:
             self._update_add_button_state()
             return
 
-        # Пытаемся извлечь ID
         sid = parse_series_id(text)
         if sid is not None:
-            # Автоподстановка в ID (без рекурсивного триггера)
             if self.id_edit.text().strip() != str(sid):
                 self.id_edit.blockSignals(True)
                 self.id_edit.setText(str(sid))
                 self.id_edit.blockSignals(False)
             self._set_status("")
         else:
-            # Не удалось распарсить — но не стираем ID (пользователь мог ввести вручную)
             self._set_status("")
 
         self._update_add_button_state()
 
     def _on_id_changed(self, text: str):
-        """
-        Пользователь меняет поле ID.
-        Просто обновляем состояние кнопки.
-        """
         self._update_add_button_state()
 
     def _update_add_button_state(self):
-        """
-        Включает/выключает кнопку «Добавить в библиотеку».
-        Кнопка активна, если в поле ID — валидное положительное число.
-        """
         sid_str = self.id_edit.text().strip()
-
-        # Простая валидация: непусто и всё цифры
         is_valid = bool(sid_str) and sid_str.isdigit() and int(sid_str) > 0
-
         self.add_btn.setEnabled(is_valid)
-
-    # ============================================================
-    # Основное действие
-    # ============================================================
 
     def _on_add_clicked(self):
         sid_str = self.id_edit.text().strip()
@@ -225,22 +183,21 @@ class AddSeriesDialog(QDialog):
 
         sid = int(sid_str)
 
-        # Уже в БД?
         existing = self.db.get_series(sid)
         if existing:
             title = existing["title"] or f"ID {sid}"
-            answer = QMessageBox.question(
+            from ui_qt.dialogs.delete_dialog import ask_yes_no
+            if ask_yes_no(
                 self,
                 i18n.tr("add_series.already_exists"),
                 f"«{title}» уже есть в библиотеке.\nОткрыть его?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if answer == QMessageBox.StandardButton.Yes:
+                yes_text=i18n.tr("common.open"),
+                no_text=i18n.tr("common.cancel"),
+            ):
                 self.result_series_id = sid
                 self.accept()
             return
 
-        # Запускаем фоновую загрузку
         self._set_status("Загрузка метаданных…")
         self.add_btn.setEnabled(False)
         self.cancel_btn.setEnabled(False)
@@ -260,25 +217,18 @@ class AddSeriesDialog(QDialog):
         self.cancel_btn.setEnabled(True)
         self._update_add_button_state()
 
-    # ============================================================
-    # Результаты загрузки
-    # ============================================================
-
     def _on_loaded(self, data: dict):
         sid = data.get("id")
         logger.info(f"Метаданные получены для {sid}")
 
         try:
-            # 1. Сохраняем сериал
             self.db.upsert_series(data)
 
-            # 2. Эпизоды
             episodes = data.get("episodes") or []
             if episodes:
                 self.db.upsert_episodes(episodes)
                 logger.info(f"Сохранено эпизодов: {len(episodes)}")
 
-            # 3. Обложка
             poster_url = data.get("posterUrl")
             if poster_url:
                 local = get_or_download(sid, poster_url)
@@ -286,7 +236,6 @@ class AddSeriesDialog(QDialog):
                     self.db.set_local_poster(sid, local)
                     logger.info(f"Обложка скачана: {local}")
 
-            # 4. Сканирование локальных файлов
             if self.library_path:
                 found = scan_series_files(self.db, sid, self.library_path)
                 logger.info(f"Найдено локальных файлов: {found}")
@@ -309,20 +258,12 @@ class AddSeriesDialog(QDialog):
         logger.error(f"Ошибка загрузки: {error}")
         self._set_status(f"Ошибка: {error}", error=True)
 
-    # ============================================================
-    # Вспомогательные
-    # ============================================================
-
     def _set_status(self, text: str, error: bool = False):
         self.status_label.setText(text)
         if error:
             self.status_label.setStyleSheet("font-size: 12px; color: #d97a7a;")
         else:
             self.status_label.setStyleSheet("font-size: 12px; color: #888888;")
-
-    # ============================================================
-    # Публичное API
-    # ============================================================
 
     def get_series_id(self):
         return self.result_series_id

@@ -3,6 +3,7 @@
 
 import os
 import logging
+import shutil
 import threading
 
 from PySide6.QtCore import Qt, Signal, QObject, QTimer
@@ -10,7 +11,7 @@ from PySide6.QtGui import QPixmap, QAction
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QComboBox, QFrame, QScrollArea, QGridLayout,
-    QMenu,
+    QMenu, QDialog, QMessageBox,
 )
 
 from core.constants import (
@@ -202,8 +203,6 @@ class LibraryView(QWidget):
         root.addWidget(self._make_grid_area(), 1)
         root.addWidget(self._make_bottom_bar())
 
-    # ---------- Верхняя панель ----------
-
     def _make_top_bar(self) -> QFrame:
         bar = QFrame()
         bar.setObjectName("topBar")
@@ -249,6 +248,12 @@ class LibraryView(QWidget):
         self.downloads_btn.clicked.connect(self._on_downloads_click)
         layout.addWidget(self.downloads_btn)
 
+        self.ignored_btn = QPushButton(self._format_ignored_text())
+        self.ignored_btn.setFixedSize(56, 42)
+        self.ignored_btn.setToolTip(i18n.tr("ignored.tooltip"))
+        self.ignored_btn.clicked.connect(self._on_ignored_click)
+        layout.addWidget(self.ignored_btn)
+
         self.settings_btn = QPushButton("⚙")
         self.settings_btn.setFixedSize(46, 42)
         self.settings_btn.clicked.connect(self.app.show_settings)
@@ -261,7 +266,11 @@ class LibraryView(QWidget):
             return f"📥 {self._downloads_count}"
         return "📥"
 
-    # ---------- Панель фильтров ----------
+    def _format_ignored_text(self) -> str:
+        count = self.app.db.count_ignored()
+        if count > 0:
+            return f"🚫 {count}"
+        return "🚫"
 
     def _make_filter_bar(self) -> QFrame:
         bar = QFrame()
@@ -322,8 +331,6 @@ class LibraryView(QWidget):
 
         return bar
 
-    # ---------- Сетка плиток ----------
-
     def _make_grid_area(self) -> QScrollArea:
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -354,8 +361,6 @@ class LibraryView(QWidget):
         if obj is self.scroll.viewport() and event.type() == event.Type.Resize:
             self._resize_timer.start()
         return super().eventFilter(obj, event)
-
-    # ---------- Нижняя панель ----------
 
     def _make_bottom_bar(self) -> QFrame:
         bar = QFrame()
@@ -406,6 +411,9 @@ class LibraryView(QWidget):
             if w:
                 w.deleteLater()
 
+        # Обновляем счётчик игнорируемых
+        self.ignored_btn.setText(self._format_ignored_text())
+
         library_path = self.app.settings.library_path
         if not library_path:
             self._show_empty(i18n.tr("library.no_library_path"))
@@ -415,6 +423,11 @@ class LibraryView(QWidget):
         rows = self.app.db.list_series()
         rows = [dict(r) for r in rows]
 
+        # Исключаем игнорируемые тайтлы
+        ignored_ids = {r["series_id"] for r in self.app.db.list_ignored()}
+        if ignored_ids:
+            rows = [r for r in rows if r["series_id"] not in ignored_ids]
+
         if self.search_text:
             needle = self.search_text.lower()
             rows = [r for r in rows if needle in (r["title"] or "").lower()]
@@ -423,8 +436,17 @@ class LibraryView(QWidget):
         rows = self._apply_sort(rows)
 
         if not rows:
-            if not self.app.db.list_series():
+            # Проверяем: вообще есть сериалы или нет
+            total_count = len(self.app.db.list_series())
+            ignored_count = len(ignored_ids)
+
+            if total_count == 0:
                 self._show_empty(i18n.tr("library.no_series"))
+            elif ignored_count >= total_count:
+                self._show_empty(
+                    "Все тайтлы скрыты в игноре.\n"
+                    "Нажмите 🚫 в верхней панели, чтобы вернуть."
+                )
             else:
                 self._show_empty("Ничего не найдено.")
             self.found_label.setText(i18n.tr("library.found", count=0))
@@ -544,6 +566,14 @@ class LibraryView(QWidget):
         logger.info("Окно очереди загрузок — в разработке")
         self.status_label.setText("Очередь загрузок — в разработке…")
 
+    def _on_ignored_click(self):
+        """Открывает диалог управления игнорируемыми тайтлами."""
+        from ui_qt.dialogs.ignored_dialog import IgnoredSeriesDialog
+        dlg = IgnoredSeriesDialog(self, self.app.db)
+        dlg.exec()
+        if dlg.changed:
+            self.refresh()
+
     def _set_downloads_count(self, count: int):
         self._downloads_count = max(0, int(count))
         self.downloads_btn.setText(self._format_downloads_text())
@@ -551,37 +581,52 @@ class LibraryView(QWidget):
     def _on_tile_right_click(self, series_id: int, global_pos):
         menu = QMenu(self)
 
-        act_open = QAction("▶ Открыть", self)
+        act_open = QAction(i18n.tr("context_menu.open"), self)
         act_open.triggered.connect(lambda: self.app.show_series(series_id))
         menu.addAction(act_open)
 
-        act_refresh = QAction("🔄 Обновить метаданные", self)
+        act_refresh = QAction(i18n.tr("context_menu.refresh"), self)
         act_refresh.triggered.connect(
             lambda: logger.info(f"Обновить метаданные {series_id}")
         )
         menu.addAction(act_refresh)
 
-        act_open_folder = QAction("📁 Открыть папку", self)
+        act_open_folder = QAction(i18n.tr("context_menu.open_folder"), self)
         act_open_folder.triggered.connect(
             lambda: self._open_series_folder(series_id)
         )
         menu.addAction(act_open_folder)
 
-        act_all_watched = QAction("✓ Отметить все серии просмотренными", self)
+        act_all_watched = QAction(
+            i18n.tr("context_menu.mark_all_watched"), self
+        )
         act_all_watched.triggered.connect(
             lambda: self._mark_all_watched(series_id)
         )
         menu.addAction(act_all_watched)
 
-        act_site = QAction("🌐 Открыть на Anime365", self)
+        act_site = QAction(i18n.tr("context_menu.open_on_site"), self)
         act_site.triggered.connect(lambda: self._open_on_site(series_id))
         menu.addAction(act_site)
 
         menu.addSeparator()
 
-        act_delete = QAction("🗑 Удалить из медиатеки", self)
+        if self.app.db.is_ignored(series_id):
+            act_unignore = QAction(i18n.tr("context_menu.unignore"), self)
+            act_unignore.triggered.connect(
+                lambda: self._unignore_series(series_id)
+            )
+            menu.addAction(act_unignore)
+        else:
+            act_ignore = QAction(i18n.tr("context_menu.ignore"), self)
+            act_ignore.triggered.connect(
+                lambda: self._ignore_series(series_id)
+            )
+            menu.addAction(act_ignore)
+
+        act_delete = QAction(i18n.tr("context_menu.delete"), self)
         act_delete.triggered.connect(
-            lambda: logger.info(f"Удалить {series_id} — в разработке")
+            lambda: self._delete_series(series_id)
         )
         menu.addAction(act_delete)
 
@@ -593,6 +638,10 @@ class LibraryView(QWidget):
             return
         path = os.path.join(lib, str(series_id))
         if not os.path.isdir(path):
+            QMessageBox.information(
+                self, "Папка не найдена",
+                f"Папка не существует:\n{path}",
+            )
             return
         try:
             os.startfile(path)
@@ -618,6 +667,113 @@ class LibraryView(QWidget):
                 url = data["url"]
         if url:
             webbrowser.open(url)
+
+    def _ignore_series(self, series_id: int):
+        """Добавляет тайтл в игнор (с подтверждением)."""
+        from ui_qt.dialogs.delete_dialog import AddToIgnoreDialog
+
+        row = self.app.db.get_series(series_id)
+        title = (row["title"] if row else None) or f"ID {series_id}"
+
+        dlg = AddToIgnoreDialog(self, title, series_id)
+        if not dlg.exec():
+            return
+        if not dlg.confirmed():
+            return
+
+        self.app.db.add_ignored(series_id, title=title, reason="manual")
+        logger.info(f"Тайтл {series_id} добавлен в игнор")
+        self.refresh()
+
+    def _unignore_series(self, series_id: int):
+        """Убирает тайтл из игнора."""
+        from ui_qt.dialogs.delete_dialog import ask_yes_no
+
+        row = self.app.db.get_series(series_id)
+        title = (row["title"] if row else None) or f"ID {series_id}"
+
+        if not ask_yes_no(
+            self,
+            i18n.tr("ignored.remove_confirm_title"),
+            i18n.tr("ignored.confirm_text", title=title),
+        ):
+            return
+
+        self.app.db.remove_ignored(series_id)
+        logger.info(f"Тайтл {series_id} убран из игнора")
+        self.refresh()
+
+    def _delete_series(self, series_id: int):
+        """Удаляет тайтл из медиатеки."""
+        row = self.app.db.get_series(series_id)
+        if not row:
+            return
+
+        title = row["title"] or f"ID {series_id}"
+
+        files = self.app.db.list_local_files(series_id)
+        files_count = len(files)
+        total_size = sum((f["file_size"] or 0) for f in files)
+        already_ignored = self.app.db.is_ignored(series_id)
+
+        from ui_qt.dialogs.delete_dialog import DeleteSeriesDialog
+        dlg = DeleteSeriesDialog(
+            self, series_title=title, series_id=series_id,
+            files_count=files_count, total_size=total_size,
+            already_ignored=already_ignored,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        delete_files = dlg.should_delete_files()
+        add_to_ignore = dlg.should_ignore()
+
+        # 1. Удаляем файлы с диска
+        if delete_files:
+            library_path = self.app.settings.library_path
+            if library_path:
+                series_dir = os.path.join(library_path, str(series_id))
+                if os.path.isdir(series_dir):
+                    try:
+                        shutil.rmtree(series_dir)
+                        logger.info(
+                            i18n.tr("series_delete.folder_deleted",
+                                    path=series_dir)
+                        )
+                    except OSError as e:
+                        logger.error(
+                            f"Не удалось удалить папку {series_dir}: {e}"
+                        )
+                        QMessageBox.warning(
+                            self,
+                            i18n.tr("common.error"),
+                            i18n.tr("series_delete.folder_error",
+                                    error=str(e)),
+                        )
+
+        # 2. Удаляем из БД
+        try:
+            self.app.db.delete_series(series_id)
+            logger.info(
+                i18n.tr("series_delete.success", series_id=series_id)
+            )
+        except Exception as e:
+            logger.exception("Ошибка удаления из БД")
+            QMessageBox.critical(
+                self,
+                i18n.tr("common.error"),
+                i18n.tr("series_delete.db_error", error=str(e)),
+            )
+            return
+
+        # 3. Добавляем в игнор (если выбрано)
+        if add_to_ignore and not delete_files:
+            self.app.db.add_ignored(
+                series_id, title=title, reason="delete_keep_files"
+            )
+            logger.info(f"Тайтл {series_id} добавлен в игнор")
+
+        self.refresh()
 
     # ============================================================
     # Сканирование
@@ -664,10 +820,17 @@ class LibraryView(QWidget):
     def _on_scan_finished(self, stats: dict):
         self._is_scanning = False
         self.scan_btn.setEnabled(True)
+
+        parts = [
+            f"сериалов {stats['series_found']}",
+            f"файлов {stats['files_found']}",
+        ]
+        skipped = stats.get("series_skipped_ignored", 0)
+        if skipped:
+            parts.append(f"пропущено {skipped} (игнор)")
+
         self.status_label.setText(
-            f"Сканирование завершено: "
-            f"сериалов {stats['series_found']}, "
-            f"файлов {stats['files_found']}"
+            "Сканирование завершено: " + ", ".join(parts)
         )
         self.refresh()
 
