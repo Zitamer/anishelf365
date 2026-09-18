@@ -3,10 +3,13 @@
 
 import logging
 import os
+import subprocess
+import sys
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QLabel, QStackedWidget, QDialog,
+    QMainWindow, QWidget, QVBoxLayout, QLabel, QStackedWidget,
+    QApplication, QDialog,
 )
 
 from core.constants import (
@@ -46,7 +49,6 @@ class AnimeLibraryApp(QMainWindow):
         apply_theme(theme)
         logger.info(f"Применена тема: {theme}")
 
-        # Глобальный менеджер скачиваний
         self.download_manager = DownloadManager(self)
 
         self.setWindowTitle(APP_NAME)
@@ -97,28 +99,70 @@ class AnimeLibraryApp(QMainWindow):
         self._set_view(SeriesView(self, series_id))
 
     def show_add_series(self):
-        """Открывает диалог добавления тайтла."""
         logger.info("Открываем диалог добавления тайтла")
-
         from ui_qt.dialogs.add_series_dialog import AddSeriesDialog
 
         library_path = self.settings.library_path or ""
         dlg = AddSeriesDialog(
             self, api=self.api, db=self.db, library_path=library_path,
         )
-
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-
         sid = dlg.get_series_id()
         if not sid:
             return
-
         logger.info(f"Тайтл {sid} добавлен — открываем экран")
         self.show_series(sid)
 
     def show_settings(self):
-        logger.info("Настройки — в разработке")
+        logger.info("Открываем настройки")
+        from ui_qt.settings_dialog import SettingsDialog
+
+        dlg = SettingsDialog(self)
+        result = dlg.exec()
+
+        if result == QDialog.DialogCode.Accepted and dlg.need_restart:
+            self.restart_app()
+
+    # ============================================================
+    # Перезапуск приложения
+    # ============================================================
+
+    def restart_app(self):
+        """Перезапускает приложение (для применения настроек)."""
+        logger.info("Перезапуск приложения…")
+
+        # Закрываем менеджер загрузок
+        try:
+            self.download_manager.shutdown(timeout_ms=2000)
+        except Exception:
+            logger.exception("Ошибка остановки загрузок")
+
+        # Закрываем БД
+        try:
+            self.db.close()
+        except Exception:
+            logger.exception("Ошибка закрытия БД")
+
+        # Формируем команду запуска
+        if getattr(sys, "frozen", False):
+            # Скомпилированный .exe — sys.executable = сам .exe
+            args = [sys.executable]
+        else:
+            # Из исходников — python script.py
+            args = [sys.executable] + sys.argv
+
+        logger.info(f"Запуск: {args}")
+
+        try:
+            subprocess.Popen(args, close_fds=True)
+        except OSError as e:
+            logger.error(f"Не удалось перезапустить: {e}")
+            QApplication.instance().quit()
+            return
+
+        # Жёсткий выход, чтобы не сработал closeEvent дважды
+        os._exit(0)
 
     # ============================================================
     # Вспомогательные

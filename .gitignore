@@ -41,6 +41,16 @@ env/
 Thumbs.db
 desktop.ini
 
-# Local tests
-test_*.py
-*_test.py
+# Local tests (only in project root, NOT in tests/ folder)
+/test_*.py
+/*_test.py
+
+# But always include tests/ folder
+!tests/
+!tests/**
+
+# ---------- Pytest ----------
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
