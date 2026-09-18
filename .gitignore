@@ -54,3 +54,5 @@ desktop.ini
 .coverage
 htmlcov/
 coverage.xml
+# Never track pycache inside tests (overrides !tests/**)
+tests/__pycache__/
