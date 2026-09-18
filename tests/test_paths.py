@@ -19,18 +19,22 @@ class TestRelPaths:
 
 
 class TestAbsPaths:
-    def test_abs_series_dir(self):
-        lib = r"C:\Anime"
-        assert P.abs_series_dir(lib, 41893) == os.path.normpath(
-            r"C:\Anime\41893"
-        )
+    """
+    Тесты платформонезависимые: собираем ожидаемый путь через os.path.join,
+    а не хардкодим Windows-разделители. Иначе на Linux CI получаем
+    'C:\\Anime/41893' vs 'C:\\Anime\\41893'.
+    """
 
-    def test_abs_video_path(self):
-        lib = r"C:\Anime"
+    def test_abs_series_dir(self, tmp_path):
+        lib = str(tmp_path / "Anime")
+        expected = os.path.join(lib, "41893")
+        assert P.abs_series_dir(lib, 41893) == expected
+
+    def test_abs_video_path(self, tmp_path):
+        lib = str(tmp_path / "Anime")
         result = P.abs_video_path(lib, 41893, 380000, 5931743)
-        assert result.endswith(os.path.normpath(
-            "41893/380000_5931743.mp4"
-        ))
+        expected = os.path.join(lib, "41893", "380000_5931743.mp4")
+        assert os.path.normpath(result) == os.path.normpath(expected)
 
 
 class TestParseFilename:
