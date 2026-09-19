@@ -40,6 +40,7 @@ class ControlledThread(QObject):
                  parent=None):
         super().__init__(parent)
         self.episode_id = episode_id
+        self.cancel_called = False
         ControlledThread.instances.append(self)
 
     def start(self):
@@ -54,7 +55,7 @@ class ControlledThread(QObject):
         self.finished.emit()
 
     def cancel(self):
-        pass
+        self.cancel_called = True
 
     def isRunning(self):
         return False

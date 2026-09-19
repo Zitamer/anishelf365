@@ -764,6 +764,7 @@ class SeriesView(QWidget):
             quality=result["quality"], author=result["author"],
             translation_type=result["translation_type"],
             translation_lang=self.translation_lang,
+            series_title=self.series_row["title"],
         )
 
     def on_download_progress(self, episode_id, stage, percent):

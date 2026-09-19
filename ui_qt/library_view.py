@@ -593,8 +593,11 @@ class LibraryView(QWidget):
         self.app.show_series(series_id)
 
     def _on_downloads_click(self):
-        logger.info("Окно очереди загрузок — в разработке")
-        self.status_label.setText("Очередь загрузок — в разработке…")
+        from ui_qt.dialogs.queue_dialog import QueueDialog
+        dlg = QueueDialog(self, self.app.download_manager)
+        dlg.exec()
+        # На случай, если что-то отменили — синхронизируем счётчик.
+        self._update_downloads_count()
 
     def _on_ignored_click(self):
         from ui_qt.dialogs.ignored_dialog import IgnoredSeriesDialog

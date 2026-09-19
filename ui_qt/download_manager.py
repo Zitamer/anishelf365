@@ -86,6 +86,7 @@ class DownloadManager(QObject):
         super().__init__(parent)
         self._current_thread = None
         self._current_episode_id = None
+        self._current_task = None
         self._queue = []
         self._all_threads = []
         self._states = {}
@@ -109,16 +110,38 @@ class DownloadManager(QObject):
     def get_queue_info(self):
         return self._current_episode_id, len(self._queue)
 
+    def get_active_task(self):
+        """
+        Информация об активной задаче или None.
+        Словарь — копия task + stage/percent из _states.
+        """
+        if self._current_task is None:
+            return None
+        info = dict(self._current_task)
+        state = self._states.get(self._current_episode_id)
+        if state:
+            info["stage"] = state.get("stage", "video")
+            info["percent"] = state.get("percent", 0)
+        else:
+            info["stage"] = "video"
+            info["percent"] = 0
+        return info
+
+    def get_pending(self):
+        """Список ожидающих задач (копии)."""
+        return [dict(t) for t in self._queue]
+
     def start(self, api, db, library_path, series_id, episode_id,
               episode_number, translation_id, quality, author,
-              translation_type, translation_lang):
+              translation_type, translation_lang, series_title=None):
         if self.is_downloading(episode_id):
             logger.info(f"[{episode_id}] Уже в очереди/качается")
             return
 
         task = {
             "api": api, "db": db, "library_path": library_path,
-            "series_id": series_id, "episode_id": episode_id,
+            "series_id": series_id, "series_title": series_title,
+            "episode_id": episode_id,
             "episode_number": episode_number,
             "translation_id": translation_id, "quality": quality,
             "author": author,
@@ -131,6 +154,32 @@ class DownloadManager(QObject):
                     f"(всего в очереди: {len(self._queue)})")
         self.queue_changed.emit()
         self._process_next()
+
+    def cancel(self, episode_id: int) -> bool:
+        """
+        Отменить задачу — активную или ожидающую.
+        Возвращает True, если что-то было отменено.
+        """
+        # 1. Активная
+        if episode_id == self._current_episode_id and self._current_thread:
+            try:
+                self._current_thread.cancel()
+                logger.info(f"[{episode_id}] Запрошена отмена активной задачи")
+                return True
+            except Exception:
+                logger.exception("cancel: ошибка отмены активной задачи")
+                return False
+
+        # 2. Ожидающая
+        for i, task in enumerate(self._queue):
+            if task["episode_id"] == episode_id:
+                self._queue.pop(i)
+                self._states.pop(episode_id, None)
+                logger.info(f"[{episode_id}] Убрано из очереди")
+                self.queue_changed.emit()
+                return True
+
+        return False
 
     def shutdown(self, timeout_ms: int = 3000):
         logger.info(f"shutdown: {len(self._all_threads)} потоков, "
@@ -148,6 +197,7 @@ class DownloadManager(QObject):
         self._all_threads.clear()
         self._current_thread = None
         self._current_episode_id = None
+        self._current_task = None
 
     # ---------- Внутренние ----------
 
@@ -181,6 +231,7 @@ class DownloadManager(QObject):
 
         self._current_thread = thread
         self._current_episode_id = eid
+        self._current_task = task
         self._all_threads.append(thread)
         thread.start()
 
@@ -196,6 +247,7 @@ class DownloadManager(QObject):
         self._states.pop(episode_id, None)
         self._current_thread = None
         self._current_episode_id = None
+        self._current_task = None
         self.finished.emit(episode_id)
         self._process_next()
         self.queue_changed.emit()
@@ -205,6 +257,7 @@ class DownloadManager(QObject):
         self._states.pop(episode_id, None)
         self._current_thread = None
         self._current_episode_id = None
+        self._current_task = None
         self.error.emit(episode_id, error)
         self._process_next()
         self.queue_changed.emit()

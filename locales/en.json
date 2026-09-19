@@ -178,6 +178,13 @@
     "notify.banner.text": "Check new episodes",
 
     "queue.title": "Download queue",
+    "queue.episode": "Episode {number}",
+    "queue.waiting": "Waiting",
+    "queue.empty": "Queue is empty",
+    "queue.cancel": "Cancel",
+    "queue.cancel_active_confirm_title": "Cancel download?",
+    "queue.cancel_active_confirm_text": "Current download will be aborted. Partial file will be removed.",
+    "queue.close": "Close",
 
     "common.yes": "Yes",
     "common.no": "No",

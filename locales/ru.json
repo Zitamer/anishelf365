@@ -178,6 +178,13 @@
     "notify.banner.text": "Проверьте новые серии",
 
     "queue.title": "Очередь загрузок",
+    "queue.episode": "Серия {number}",
+    "queue.waiting": "В очереди",
+    "queue.empty": "Очередь пуста",
+    "queue.cancel": "Отменить",
+    "queue.cancel_active_confirm_title": "Отменить загрузку?",
+    "queue.cancel_active_confirm_text": "Текущая загрузка будет прервана. Частично скачанный файл будет удалён.",
+    "queue.close": "Закрыть",
 
     "common.yes": "Да",
     "common.no": "Нет",
