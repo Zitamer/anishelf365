@@ -122,3 +122,46 @@ class TestAddToIgnoreDialog:
         qtbot.addWidget(dlg)
         dlg._on_accept()
         assert dlg.confirmed() is True
+
+# ============================================================
+# AddSeriesDialog — активация кнопки
+# ============================================================
+
+class TestAddSeriesDialogButtonState:
+    def _make(self, qtbot, mock_app_for_ui, tmp_library):
+        from ui_qt.dialogs.add_series_dialog import AddSeriesDialog
+        dlg = AddSeriesDialog(
+            None,
+            api=mock_app_for_ui.api,
+            db=mock_app_for_ui.db,
+            library_path=tmp_library,
+        )
+        qtbot.addWidget(dlg)
+        return dlg
+
+    def test_button_disabled_initially(self, qtbot, mock_app_for_ui, tmp_library):
+        dlg = self._make(qtbot, mock_app_for_ui, tmp_library)
+        assert dlg.add_btn.isEnabled() is False
+
+    def test_button_enabled_on_url_paste(self, qtbot, mock_app_for_ui, tmp_library):
+        dlg = self._make(qtbot, mock_app_for_ui, tmp_library)
+        dlg.url_edit.setText(
+            "https://smotret-anime.org/catalog/yani-neko-41893"
+        )
+        assert dlg.id_edit.text() == "41893"
+        assert dlg.add_btn.isEnabled() is True
+
+    def test_button_enabled_on_id_only(self, qtbot, mock_app_for_ui, tmp_library):
+        dlg = self._make(qtbot, mock_app_for_ui, tmp_library)
+        dlg.id_edit.setText("41893")
+        assert dlg.add_btn.isEnabled() is True
+
+    def test_button_disabled_on_garbage_id(self, qtbot, mock_app_for_ui, tmp_library):
+        dlg = self._make(qtbot, mock_app_for_ui, tmp_library)
+        dlg.id_edit.setText("abc")
+        assert dlg.add_btn.isEnabled() is False
+
+    def test_button_disabled_on_zero(self, qtbot, mock_app_for_ui, tmp_library):
+        dlg = self._make(qtbot, mock_app_for_ui, tmp_library)
+        dlg.id_edit.setText("0")
+        assert dlg.add_btn.isEnabled() is False
