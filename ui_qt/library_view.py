@@ -190,18 +190,11 @@ class LibraryView(QWidget):
 
         self._downloads_count = 0
 
-        # Первый refresh() откладываем до showEvent — там у viewport уже
-        # будет настоящая ширина. Иначе _calc_columns() вернёт дефолт и
-        # плитки сначала отрисуются «в 2 колонки», а потом моргнут.
         self._first_refresh_done = False
-
-        # Сколько колонок было при последнем refresh — чтобы не дёргать
-        # перерисовку на каждый пиксель ресайза.
         self._last_cols = -1
 
         self._build_ui()
 
-        # Счётчик очереди загрузок в 📥: подписываемся на сигнал менеджера.
         mgr = getattr(app, "download_manager", None)
         if mgr is not None:
             try:
@@ -216,7 +209,6 @@ class LibraryView(QWidget):
         if not self._first_refresh_done:
             self._first_refresh_done = True
             QTimer.singleShot(0, self.refresh)
-        # Счётчик очереди всегда синхронизируем при показе экрана.
         self._update_downloads_count()
 
     # ============================================================
@@ -378,18 +370,19 @@ class LibraryView(QWidget):
         )
 
         self.scroll.setWidget(self.grid_container)
-
-        # Ловим ресайз viewport — пересчёт колонок делаем мгновенно,
-        # перерисовку — только если число колонок изменилось.
         self.scroll.viewport().installEventFilter(self)
 
         return self.scroll
 
     def eventFilter(self, obj, event):
-        if obj is self.scroll.viewport() and event.type() == event.Type.Resize:
-            new_cols = self._calc_columns()
-            if new_cols != self._last_cols:
-                self.refresh()
+        if obj is self.scroll.viewport():
+            if event.type() == event.Type.Resize:
+                new_cols = self._calc_columns()
+                if new_cols != self._last_cols:
+                    self.refresh()
+            elif event.type() == event.Type.ContextMenu:
+                self._show_background_context_menu(event.globalPos())
+                return True
         return super().eventFilter(obj, event)
 
     def _make_bottom_bar(self) -> QFrame:
@@ -545,8 +538,6 @@ class LibraryView(QWidget):
         if width < 100:
             width = 1200
 
-        # Точная формула: 2*15 (layout margins) + n*tile_w + (n-1)*10 <= width
-        # ⟹ n <= (width - 20) / (tile_w + 10)
         margin = 20
         step = LIBRARY_TILE_W + 10
         cols = max(1, (width - margin) // step)
@@ -596,7 +587,6 @@ class LibraryView(QWidget):
         from ui_qt.dialogs.queue_dialog import QueueDialog
         dlg = QueueDialog(self, self.app.download_manager)
         dlg.exec()
-        # На случай, если что-то отменили — синхронизируем счётчик.
         self._update_downloads_count()
 
     def _on_ignored_click(self):
@@ -611,11 +601,9 @@ class LibraryView(QWidget):
         self.downloads_btn.setText(self._format_downloads_text())
 
     def _on_queue_changed(self):
-        """Реакция на изменение очереди загрузок."""
         self._update_downloads_count()
 
     def _update_downloads_count(self):
-        """Считывает состояние менеджера и обновляет текст кнопки 📥."""
         mgr = getattr(self.app, "download_manager", None)
         if mgr is None:
             return
@@ -626,6 +614,26 @@ class LibraryView(QWidget):
             return
         total = (1 if active is not None else 0) + int(queued or 0)
         self._set_downloads_count(total)
+
+    # ---------- Контекстное меню по свободному месту ----------
+
+    def _show_background_context_menu(self, global_pos):
+        """ПКМ по пустому месту — быстрые действия."""
+        menu = QMenu(self)
+
+        act_add = QAction(i18n.tr("context_menu.bg_add"), self)
+        act_add.triggered.connect(self.app.show_add_series)
+        menu.addAction(act_add)
+
+        act_check = QAction(i18n.tr("context_menu.bg_check"), self)
+        act_check.triggered.connect(self._on_check_new)
+        menu.addAction(act_check)
+
+        act_scan = QAction(i18n.tr("context_menu.bg_scan"), self)
+        act_scan.triggered.connect(self._on_scan)
+        menu.addAction(act_scan)
+
+        menu.exec(global_pos)
 
     def _on_tile_right_click(self, series_id: int, global_pos):
         menu = QMenu(self)

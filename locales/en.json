@@ -185,6 +185,10 @@
     "queue.cancel_active_confirm_title": "Cancel download?",
     "queue.cancel_active_confirm_text": "Current download will be aborted. Partial file will be removed.",
     "queue.close": "Close",
+    "queue.move_top": "Move to top",
+    "queue.move_up": "Move up",
+    "queue.move_down": "Move down",
+    "queue.move_bottom": "Move to bottom",
 
     "common.yes": "Yes",
     "common.no": "No",
@@ -231,5 +235,8 @@
     "context_menu.open_on_site": "🌐 Open on Anime365",
     "context_menu.ignore": "🚫 Add to ignore",
     "context_menu.unignore": "↩ Remove from ignore",
-    "context_menu.delete": "🗑 Delete from library"
+    "context_menu.delete": "🗑 Delete from library",
+    "context_menu.bg_add": "➕ Add series",
+    "context_menu.bg_check": "🔔 Check for new episodes",
+    "context_menu.bg_scan": "🔄 Refresh library"
 }

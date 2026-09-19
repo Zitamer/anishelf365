@@ -111,10 +111,7 @@ class DownloadManager(QObject):
         return self._current_episode_id, len(self._queue)
 
     def get_active_task(self):
-        """
-        Информация об активной задаче или None.
-        Словарь — копия task + stage/percent из _states.
-        """
+        """Информация об активной задаче или None."""
         if self._current_task is None:
             return None
         info = dict(self._current_task)
@@ -160,7 +157,6 @@ class DownloadManager(QObject):
         Отменить задачу — активную или ожидающую.
         Возвращает True, если что-то было отменено.
         """
-        # 1. Активная
         if episode_id == self._current_episode_id and self._current_thread:
             try:
                 self._current_thread.cancel()
@@ -170,7 +166,6 @@ class DownloadManager(QObject):
                 logger.exception("cancel: ошибка отмены активной задачи")
                 return False
 
-        # 2. Ожидающая
         for i, task in enumerate(self._queue):
             if task["episode_id"] == episode_id:
                 self._queue.pop(i)
@@ -180,6 +175,52 @@ class DownloadManager(QObject):
                 return True
 
         return False
+
+    # ---------- Перемещение в очереди ----------
+
+    def _find_pending_index(self, episode_id: int) -> int:
+        for i, task in enumerate(self._queue):
+            if task["episode_id"] == episode_id:
+                return i
+        return -1
+
+    def move_up(self, episode_id: int) -> bool:
+        i = self._find_pending_index(episode_id)
+        if i <= 0:
+            return False
+        self._queue[i - 1], self._queue[i] = self._queue[i], self._queue[i - 1]
+        logger.info(f"[{episode_id}] Перемещено вверх (позиция {i} → {i - 1})")
+        self.queue_changed.emit()
+        return True
+
+    def move_down(self, episode_id: int) -> bool:
+        i = self._find_pending_index(episode_id)
+        if i < 0 or i >= len(self._queue) - 1:
+            return False
+        self._queue[i], self._queue[i + 1] = self._queue[i + 1], self._queue[i]
+        logger.info(f"[{episode_id}] Перемещено вниз (позиция {i} → {i + 1})")
+        self.queue_changed.emit()
+        return True
+
+    def move_to_top(self, episode_id: int) -> bool:
+        i = self._find_pending_index(episode_id)
+        if i <= 0:
+            return False
+        task = self._queue.pop(i)
+        self._queue.insert(0, task)
+        logger.info(f"[{episode_id}] Перемещено наверх очереди")
+        self.queue_changed.emit()
+        return True
+
+    def move_to_bottom(self, episode_id: int) -> bool:
+        i = self._find_pending_index(episode_id)
+        if i < 0 or i >= len(self._queue) - 1:
+            return False
+        task = self._queue.pop(i)
+        self._queue.append(task)
+        logger.info(f"[{episode_id}] Перемещено в конец очереди")
+        self.queue_changed.emit()
+        return True
 
     def shutdown(self, timeout_ms: int = 3000):
         logger.info(f"shutdown: {len(self._all_threads)} потоков, "

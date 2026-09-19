@@ -56,3 +56,6 @@ htmlcov/
 coverage.xml
 # Never track pycache inside tests (overrides !tests/**)
 tests/__pycache__/
+
+# Personal notes
+BUGS.md

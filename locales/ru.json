@@ -185,6 +185,10 @@
     "queue.cancel_active_confirm_title": "Отменить загрузку?",
     "queue.cancel_active_confirm_text": "Текущая загрузка будет прервана. Частично скачанный файл будет удалён.",
     "queue.close": "Закрыть",
+    "queue.move_top": "Наверх",
+    "queue.move_up": "Вверх",
+    "queue.move_down": "Вниз",
+    "queue.move_bottom": "В самый низ",
 
     "common.yes": "Да",
     "common.no": "Нет",
@@ -231,5 +235,8 @@
     "context_menu.open_on_site": "🌐 Открыть на Anime365",
     "context_menu.ignore": "🚫 Добавить в игнор",
     "context_menu.unignore": "↩ Убрать из игнора",
-    "context_menu.delete": "🗑 Удалить из медиатеки"
+    "context_menu.delete": "🗑 Удалить из медиатеки",
+    "context_menu.bg_add": "➕ Добавить тайтл",
+    "context_menu.bg_check": "🔔 Проверить новые серии",
+    "context_menu.bg_scan": "🔄 Обновить библиотеку"
 }
