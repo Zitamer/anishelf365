@@ -201,12 +201,23 @@ class LibraryView(QWidget):
 
         self._build_ui()
 
+        # Счётчик очереди загрузок в 📥: подписываемся на сигнал менеджера.
+        mgr = getattr(app, "download_manager", None)
+        if mgr is not None:
+            try:
+                mgr.queue_changed.connect(self._on_queue_changed)
+            except Exception:
+                logger.exception("Не удалось подключиться к queue_changed")
+            self._update_downloads_count()
+
     def showEvent(self, event):
         """Первый показ — отложенный refresh после того, как layout устоится."""
         super().showEvent(event)
         if not self._first_refresh_done:
             self._first_refresh_done = True
             QTimer.singleShot(0, self.refresh)
+        # Счётчик очереди всегда синхронизируем при показе экрана.
+        self._update_downloads_count()
 
     # ============================================================
     # Разметка
@@ -595,6 +606,23 @@ class LibraryView(QWidget):
     def _set_downloads_count(self, count: int):
         self._downloads_count = max(0, int(count))
         self.downloads_btn.setText(self._format_downloads_text())
+
+    def _on_queue_changed(self):
+        """Реакция на изменение очереди загрузок."""
+        self._update_downloads_count()
+
+    def _update_downloads_count(self):
+        """Считывает состояние менеджера и обновляет текст кнопки 📥."""
+        mgr = getattr(self.app, "download_manager", None)
+        if mgr is None:
+            return
+        try:
+            active, queued = mgr.get_queue_info()
+        except Exception:
+            logger.exception("get_queue_info() упал")
+            return
+        total = (1 if active is not None else 0) + int(queued or 0)
+        self._set_downloads_count(total)
 
     def _on_tile_right_click(self, series_id: int, global_pos):
         menu = QMenu(self)

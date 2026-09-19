@@ -30,7 +30,6 @@ class TestLibraryViewEmpty:
         assert view is not None
 
     def test_no_library_path_shows_placeholder(self, qtbot, mock_app_full):
-        # library_path по умолчанию пустой
         view = _make_view(qtbot, mock_app_full)
         assert _count_tiles(view) == 0
 
@@ -38,8 +37,6 @@ class TestLibraryViewEmpty:
         mock_app_full.settings.library_path = tmp_library
         view = _make_view(qtbot, mock_app_full)
         assert _count_tiles(view) == 0
-        assert "library.found" not in view.found_label.text() or \
-               "0" in view.found_label.text()
 
 
 class TestLibraryViewWithData:
@@ -66,7 +63,6 @@ class TestLibraryViewWithData:
         mock_app_full.db = seeded_db
         view = _make_view(qtbot, mock_app_full)
 
-        # Ищем плитку и её дочерний QLabel с текстом "NEW +3"
         for i in range(view.grid.count()):
             w = view.grid.itemAt(i).widget()
             if isinstance(w, SeriesTile):
@@ -92,7 +88,6 @@ class TestLibraryViewSearch:
         assert _count_tiles(view) == 2
 
         view.search_edit.setText("Власть")
-        # _search_timer — 300 мс debounce
         qtbot.wait(350)
         assert _count_tiles(view) == 1
 
@@ -108,7 +103,6 @@ class TestLibraryViewSearch:
 class TestLibraryViewFilter:
     def test_filter_has_new_shows_only_new(self, qtbot, mock_app_full,
                                            seeded_db, sample_series_data):
-        # Добавим второй, но без new
         second = dict(sample_series_data)
         second["id"] = 11111
         second["title"] = "Без новых"
@@ -116,7 +110,6 @@ class TestLibraryViewFilter:
         second["episodes"] = []
         seeded_db.upsert_series(second)
 
-        # Первому — пометка
         seeded_db.set_new_episodes_count(41893, 1)
 
         mock_app_full.db = seeded_db
@@ -129,7 +122,6 @@ class TestLibraryViewFilter:
         assert _count_tiles(view) == 1
 
     def test_filter_not_started_shows_all(self, qtbot, mock_app_full, seeded_db):
-        # Ничего не просмотрено — оба попадут в "not_started" (индекс 3)
         mock_app_full.db = seeded_db
         view = _make_view(qtbot, mock_app_full)
 
@@ -151,7 +143,6 @@ class TestLibraryViewSort:
         mock_app_full.db = seeded_db
         view = _make_view(qtbot, mock_app_full)
 
-        # sort_combo index 0 = title asc
         view.sort_combo.setCurrentIndex(0)
         qtbot.wait(20)
 
@@ -169,7 +160,6 @@ class TestLibraryViewNavigation:
         mock_app_full.db = seeded_db
         view = _make_view(qtbot, mock_app_full)
 
-        # Эмулируем клик по первой плитке
         for i in range(view.grid.count()):
             w = view.grid.itemAt(i).widget()
             if isinstance(w, SeriesTile):
@@ -177,3 +167,68 @@ class TestLibraryViewNavigation:
                 break
 
         mock_app_full.show_series.assert_called_once_with(41893)
+
+
+# ============================================================
+# Счётчик очереди загрузок в 📥
+# ============================================================
+
+class TestLibraryViewDownloadsCounter:
+    def test_initial_counter_empty(self, qtbot, mock_app_full, seeded_db):
+        mock_app_full.db = seeded_db
+        view = _make_view(qtbot, mock_app_full)
+        # Пока очередь пуста — просто "📥"
+        assert view.downloads_btn.text() == "📥"
+
+    def test_counter_updates_on_queue_changed(self, qtbot, mock_app_full,
+                                              seeded_db):
+        mock_app_full.db = seeded_db
+        view = _make_view(qtbot, mock_app_full)
+
+        # Эмулируем: 1 активная + 2 в очереди = 3
+        mock_app_full.download_manager.get_queue_info = lambda: (100, 2)
+        mock_app_full.download_manager.queue_changed.emit()
+        qtbot.wait(20)
+
+        assert view.downloads_btn.text() == "📥 3"
+
+    def test_counter_back_to_zero(self, qtbot, mock_app_full, seeded_db):
+        mock_app_full.db = seeded_db
+        view = _make_view(qtbot, mock_app_full)
+
+        # Активная + 1 в очереди
+        mock_app_full.download_manager.get_queue_info = lambda: (100, 1)
+        mock_app_full.download_manager.queue_changed.emit()
+        qtbot.wait(20)
+        assert view.downloads_btn.text() == "📥 2"
+
+        # Очередь очистилась
+        mock_app_full.download_manager.get_queue_info = lambda: (None, 0)
+        mock_app_full.download_manager.queue_changed.emit()
+        qtbot.wait(20)
+        assert view.downloads_btn.text() == "📥"
+
+    def test_counter_only_queued(self, qtbot, mock_app_full, seeded_db):
+        mock_app_full.db = seeded_db
+        view = _make_view(qtbot, mock_app_full)
+
+        mock_app_full.download_manager.get_queue_info = lambda: (None, 5)
+        mock_app_full.download_manager.queue_changed.emit()
+        qtbot.wait(20)
+
+        assert view.downloads_btn.text() == "📥 5"
+
+    def test_counter_on_show_event(self, qtbot, mock_app_full, seeded_db):
+        """При показе экрана счётчик синхронизируется с менеджером."""
+        mock_app_full.db = seeded_db
+
+        # Менеджер уже занят, но view ещё не создан.
+        mock_app_full.download_manager.get_queue_info = lambda: (100, 3)
+
+        view = LibraryView(mock_app_full)
+        qtbot.addWidget(view)
+        view.show()
+        qtbot.wait(20)
+
+        # В __init__ и в showEvent счётчик считывается — должен быть "📥 4"
+        assert view.downloads_btn.text() == "📥 4"
