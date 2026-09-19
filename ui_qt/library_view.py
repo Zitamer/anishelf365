@@ -171,7 +171,7 @@ class LibraryView(QWidget):
     def __init__(self, app):
         super().__init__()
         self.app = app
-        self.api = Anime365API()
+        self.api = getattr(app, "api", None) or Anime365API()
 
         self.search_text = ""
         self.sort_key = app.settings.get("sort_key", "title")

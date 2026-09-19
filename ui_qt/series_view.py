@@ -7,12 +7,14 @@
 import os
 import json
 import logging
+import threading
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QObject, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QFrame, QScrollArea, QMessageBox, QDialog,
+    QLineEdit,
 )
 
 from core.constants import SERIES_COVER_W, SERIES_COVER_H
@@ -26,6 +28,16 @@ logger = logging.getLogger(__name__)
 
 
 TILES_ENABLED = False
+
+
+# ============================================================
+# Сигналы для фонового обновления метаданных
+# ============================================================
+
+class RefreshSignals(QObject):
+    """Сигналы для безопасного апдейта UI из фонового потока."""
+    done = Signal()
+    error = Signal(str)
 
 
 # ============================================================
@@ -69,15 +81,19 @@ def describe_file(f) -> str:
 
 class EpisodeRow(QFrame):
     def __init__(self, episode_row, local_files, progress,
-                 on_watch=None, on_download=None, on_delete=None):
+                 is_new: bool = False,
+                 on_watch=None, on_download=None, on_delete=None,
+                 on_unmark_new=None):
         super().__init__()
         self.episode_row = episode_row
         self.episode_id = episode_row["episode_id"]
         self.local_files = local_files or []
         self.progress = progress
+        self.is_new = is_new
         self.on_watch = on_watch
         self.on_download = on_download
         self.on_delete = on_delete
+        self.on_unmark_new = on_unmark_new
         self._downloading = False
 
         self.setObjectName("episodeRow")
@@ -100,6 +116,25 @@ class EpisodeRow(QFrame):
         layout.setContentsMargins(14, 6, 14, 6)
         layout.setSpacing(10)
         layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+
+        # Бейдж NEW (если эпизод новый)
+        if self.is_new:
+            new_btn = QPushButton(i18n.tr("series.new_badge"))
+            new_btn.setFixedHeight(22)
+            new_btn.setMinimumWidth(52)
+            new_btn.setToolTip(i18n.tr("series.new_badge_tooltip"))
+            new_btn.setStyleSheet(
+                "QPushButton {"
+                "  font-size: 10px; font-weight: bold;"
+                "  background-color: #2ea043; color: #ffffff;"
+                "  border: none; border-radius: 10px;"
+                "  padding: 2px 10px;"
+                "}"
+                "QPushButton:hover { background-color: #37bd51; }"
+                "QPushButton:pressed { background-color: #248c36; }"
+            )
+            new_btn.clicked.connect(self._on_new_clicked)
+            layout.addWidget(new_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         num_label = QLabel(format_episode_number(self.episode_row["number"]))
         num_label.setFixedWidth(40)
@@ -187,6 +222,10 @@ class EpisodeRow(QFrame):
             )
         layout.addWidget(self.delete_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
+    def _on_new_clicked(self):
+        if self.on_unmark_new:
+            self.on_unmark_new(self.episode_id)
+
     def _update_info_text(self, has_file):
         if self._downloading:
             return
@@ -237,16 +276,24 @@ class SeriesView(QWidget):
         super().__init__()
         self.app = app
         self.series_id = series_id
-        self.api = Anime365API()
+        # Используем общий API приложения — так тесты могут подменять
+        # mock_app_full.api и влиять на поведение экрана.
+        self.api = getattr(app, "api", None) or Anime365API()
 
         self.series_row = self.app.db.get_series(series_id)
         if not self.series_row:
             self._build_not_found()
             return
 
-        # Пользователь открыл тайтл — сбрасываем счётчик «новых» для плитки.
-        if (self.series_row["new_episodes_count"] or 0) > 0:
-            self.app.db.reset_new_episodes_count(series_id)
+        # Счётчик новых серий НЕ сбрасываем сразу — покажем плашку в шапке
+        # и метки «NEW» у эпизодов. Сброс: клик по плашке, клик по NEW
+        # у эпизода или выход с экрана (disconnect_downloads).
+        self._new_count_at_open = self.series_row["new_episodes_count"] or 0
+        self._new_ids_at_open = set()
+        self._new_banner = None
+        # Флаг «при открытии счётчик был > 0». Нужен, чтобы сбросить БД
+        # при выходе, даже если пользователь уже снял все NEW вручную.
+        self._had_new_at_open = self._new_count_at_open > 0
 
         self.translation_type = self.app.settings.get_translation_type_for_series(series_id)
         self.translation_lang = self.app.settings.get_translation_lang_for_series(series_id)
@@ -257,6 +304,17 @@ class SeriesView(QWidget):
         self._files_by_ep = {}
         self._progress_by_ep = {}
         self._rows_by_ep = {}
+
+        # Поиск по эпизодам
+        self._search_text = ""
+        self._search_timer = QTimer()
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(200)
+        self._search_timer.timeout.connect(self._apply_search)
+
+        # Обновление данных
+        self._is_refreshing = False
+        self._refresh_signals = None
 
         # Ссылки на запущенные VLC-процессы: {episode_id: Popen}
         self._vlc_processes = {}
@@ -271,6 +329,9 @@ class SeriesView(QWidget):
         self.refresh()
 
     def disconnect_downloads(self):
+        # При выходе с экрана — сбрасываем счётчик новых серий, если он ещё >0.
+        self._commit_new_reset()
+
         for signal, slot in (
             (self._manager.progress, self.on_download_progress),
             (self._manager.finished, self.on_download_finished),
@@ -281,6 +342,83 @@ class SeriesView(QWidget):
                 signal.disconnect(slot)
             except (RuntimeError, TypeError):
                 pass
+
+    # ============================================================
+    # Сброс счётчика новых серий
+    # ============================================================
+
+    def _commit_new_reset(self):
+        """Зафиксировать сброс счётчика в БД (при выходе с экрана)."""
+        if not self._had_new_at_open:
+            return
+        try:
+            self.app.db.reset_new_episodes_count(self.series_id)
+        except Exception:
+            logger.exception("Не удалось сбросить new_episodes_count")
+        self._new_count_at_open = 0
+        self._new_ids_at_open = set()
+        self._had_new_at_open = False
+
+    def _on_reset_new_clicked(self):
+        """Пользователь нажал на плашку «N новых серий» — сбрасываем всё."""
+        logger.info(f"[{self.series_id}] Сброс счётчика новых серий (клик по плашке)")
+        try:
+            self.app.db.reset_new_episodes_count(self.series_id)
+        except Exception:
+            logger.exception("Не удалось сбросить new_episodes_count")
+
+        self._new_count_at_open = 0
+        self._new_ids_at_open = set()
+        self._had_new_at_open = False
+
+        self._update_new_banner()
+        self.refresh()
+
+    def _update_new_banner(self):
+        """Обновить вид плашки без полного refresh()."""
+        if self._new_banner is None:
+            return
+        if self._new_count_at_open > 0:
+            self._new_banner.setText(
+                i18n.tr(
+                    "series.new_episodes_badge",
+                    count=self._new_count_at_open,
+                )
+            )
+            self._new_banner.show()
+        else:
+            try:
+                self._new_banner.hide()
+            except RuntimeError:
+                pass
+
+    def _on_unmark_new(self, episode_id: int):
+        """Пользователь кликнул по NEW у эпизода — снимаем отметку."""
+        if episode_id not in self._new_ids_at_open:
+            return
+        self._new_ids_at_open.discard(episode_id)
+        if self._new_count_at_open > 0:
+            self._new_count_at_open -= 1
+
+        # Сразу пишем в БД: иначе при выходе с экрана _commit_new_reset
+        # не увидит, что счётчик уже уменьшен, и оставит бейдж на главной.
+        try:
+            if self._new_count_at_open > 0:
+                self.app.db.set_new_episodes_count(
+                    self.series_id, self._new_count_at_open
+                )
+            else:
+                self.app.db.reset_new_episodes_count(self.series_id)
+                self._had_new_at_open = False
+        except Exception:
+            logger.exception("Не удалось обновить new_episodes_count")
+
+        self._update_new_banner()
+        self.refresh()
+
+    # ============================================================
+    # Экран "не найдено"
+    # ============================================================
 
     def _build_not_found(self):
         layout = QVBoxLayout(self)
@@ -293,6 +431,10 @@ class SeriesView(QWidget):
         btn.setFixedWidth(180)
         btn.clicked.connect(self.app.show_library)
         layout.addWidget(btn, alignment=Qt.AlignmentFlag.AlignCenter)
+
+    # ============================================================
+    # Разметка
+    # ============================================================
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -358,10 +500,43 @@ class SeriesView(QWidget):
         info_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         title = self.series_row["title"] or f"ID {self.series_id}"
+
+        title_row = QHBoxLayout()
+        title_row.setSpacing(10)
         title_label = QLabel(title)
         title_label.setStyleSheet("font-size: 22px; font-weight: bold;")
         title_label.setWordWrap(True)
-        info_layout.addWidget(title_label)
+        title_row.addWidget(title_label, 0)
+
+        # Плашка "N новых серий" — кликабельна, сбрасывает счётчик.
+        if self._new_count_at_open > 0:
+            self._new_banner = QPushButton(
+                i18n.tr(
+                    "series.new_episodes_badge",
+                    count=self._new_count_at_open,
+                )
+            )
+            self._new_banner.setFixedHeight(30)
+            self._new_banner.setToolTip(
+                i18n.tr("series.new_episodes_tooltip")
+            )
+            self._new_banner.setStyleSheet(
+                "QPushButton {"
+                "  font-size: 12px; font-weight: bold;"
+                "  background-color: #2ea043; color: #ffffff;"
+                "  border: none; border-radius: 15px;"
+                "  padding: 2px 14px;"
+                "}"
+                "QPushButton:hover { background-color: #37bd51; }"
+                "QPushButton:pressed { background-color: #248c36; }"
+            )
+            self._new_banner.clicked.connect(self._on_reset_new_clicked)
+            title_row.addWidget(
+                self._new_banner, 0, Qt.AlignmentFlag.AlignVCenter
+            )
+
+        title_row.addStretch()
+        info_layout.addLayout(title_row)
 
         meta_parts = []
         if self.series_row["year"]:
@@ -446,14 +621,14 @@ class SeriesView(QWidget):
         layout.addWidget(QLabel("Тип:"))
         self.type_combo = QComboBox()
         self.type_combo.addItems(["sub", "voice", "raw"])
-        self.type_combo.setFixedSize(130, 38)
+        self.type_combo.setFixedSize(110, 38)
         idx = self.type_combo.findText(self.translation_type)
         if idx >= 0:
             self.type_combo.setCurrentIndex(idx)
         self.type_combo.currentIndexChanged.connect(self._on_type_change)
         layout.addWidget(self.type_combo)
 
-        layout.addSpacing(15)
+        layout.addSpacing(10)
         layout.addWidget(QLabel("Язык:"))
 
         self.lang_combo = QComboBox()
@@ -461,7 +636,7 @@ class SeriesView(QWidget):
         lang_display = {"ru": "Русский", "en": "English", "ja": "日本語"}
         for code in self._lang_codes:
             self.lang_combo.addItem(lang_display.get(code, code), code)
-        self.lang_combo.setFixedSize(160, 38)
+        self.lang_combo.setFixedSize(140, 38)
         for i, code in enumerate(self._lang_codes):
             if code == self.translation_lang:
                 self.lang_combo.setCurrentIndex(i)
@@ -469,7 +644,17 @@ class SeriesView(QWidget):
         self.lang_combo.currentIndexChanged.connect(self._on_lang_change)
         layout.addWidget(self.lang_combo)
 
-        layout.addStretch()
+        layout.addSpacing(15)
+
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText(
+            i18n.tr("series.search_placeholder")
+        )
+        self.search_edit.setFixedHeight(38)
+        self.search_edit.setMinimumWidth(200)
+        self.search_edit.textChanged.connect(self._on_search_changed)
+        layout.addWidget(self.search_edit, 1)
+
         return bar
 
     def _make_episodes_area(self) -> QScrollArea:
@@ -488,6 +673,40 @@ class SeriesView(QWidget):
         return self.scroll
 
     # ============================================================
+    # Поиск
+    # ============================================================
+
+    def _on_search_changed(self, text: str):
+        self._search_timer.start()
+
+    def _apply_search(self):
+        self._search_text = self.search_edit.text().strip()
+        self.refresh()
+
+    def _matches_search(self, ep) -> bool:
+        if not self._search_text:
+            return True
+        needle = self._search_text.lower()
+
+        # По номеру
+        num = ep["number"]
+        if num is not None:
+            try:
+                f = float(num)
+                num_str = str(int(f)) if f.is_integer() else str(f)
+            except (ValueError, TypeError):
+                num_str = str(num)
+            if needle in num_str:
+                return True
+
+        # По названию
+        title = (ep["title"] or "").lower()
+        if needle in title:
+            return True
+
+        return False
+
+    # ============================================================
     # Данные
     # ============================================================
 
@@ -496,10 +715,23 @@ class SeriesView(QWidget):
             item = self.episodes_layout.takeAt(0)
             w = item.widget()
             if w:
+                # Сначала отвязываем от родителя — виджет исчезает из
+                # иерархии немедленно. Без этого deleteLater() откладывает
+                # удаление до следующей итерации event loop, и при частых
+                # refresh новый layout накладывался поверх старого.
+                w.setParent(None)
                 w.deleteLater()
         self._rows_by_ep = {}
 
-        self._episodes = self.app.db.list_episodes_by_type(self.series_id, "tv")
+        all_episodes = self.app.db.list_episodes_by_type(self.series_id, "tv")
+
+        # Определяем «новые» эпизоды при первом refresh — последние N по номеру.
+        if not self._new_ids_at_open and self._new_count_at_open > 0:
+            tail = all_episodes[-self._new_count_at_open:]
+            self._new_ids_at_open = {e["episode_id"] for e in tail}
+
+        # Применяем поиск
+        self._episodes = [e for e in all_episodes if self._matches_search(e)]
 
         all_files = self.app.db.list_local_files(self.series_id)
         self._files_by_ep = {}
@@ -512,11 +744,11 @@ class SeriesView(QWidget):
                 ep["episode_id"]
             )
 
-        total_eps = len(self._episodes)
+        total_eps = len(all_episodes)
         watched_count = self.app.db.count_watched(self.series_id)
 
         downloaded = 0
-        for ep in self._episodes:
+        for ep in all_episodes:
             files = self._files_by_ep.get(ep["episode_id"], [])
             if any(
                 (f["translation_type"] or "sub") == self.translation_type
@@ -531,8 +763,18 @@ class SeriesView(QWidget):
             f"{i18n.tr('series.downloaded_progress', downloaded=downloaded, total=total_eps)}"
         )
 
-        if not self._episodes:
+        if not all_episodes:
             empty = QLabel("Нет серий")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setStyleSheet("color: #888888; font-size: 14px; padding: 60px;")
+            self.episodes_layout.addWidget(empty)
+            return
+
+        if not self._episodes:
+            # Поиск не нашёл — показываем сообщение
+            empty = QLabel(
+                i18n.tr("series.search_empty", query=self._search_text)
+            )
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             empty.setStyleSheet("color: #888888; font-size: 14px; padding: 60px;")
             self.episodes_layout.addWidget(empty)
@@ -542,13 +784,16 @@ class SeriesView(QWidget):
 
         for ep in self._episodes:
             ep_id = ep["episode_id"]
+            is_new = ep_id in self._new_ids_at_open
             row = EpisodeRow(
                 ep,
                 self._files_by_ep.get(ep_id, []),
                 self._progress_by_ep.get(ep_id),
+                is_new=is_new,
                 on_watch=self._on_watch_episode,
                 on_download=self._on_download_episode,
                 on_delete=self._on_delete_episode,
+                on_unmark_new=self._on_unmark_new,
             )
             self.episodes_layout.addWidget(row)
             self._rows_by_ep[ep_id] = row
@@ -611,8 +856,6 @@ class SeriesView(QWidget):
     # ============================================================
 
     def _on_watch_episode(self, episode_id: int):
-        """Запускает внешний VLC для указанного эпизода."""
-        # 1. Ищем файл
         files = self.app.db.list_files_for_episode(episode_id)
         if not files:
             QMessageBox.information(
@@ -621,18 +864,13 @@ class SeriesView(QWidget):
             )
             return
 
-        # 2. Выбираем файл: приоритет — выбранный язык+тип
         chosen = self._pick_file(files)
         if not chosen:
             return
 
-        # 3. Проверяем существование
         library_path = self.app.settings.library_path
         if not library_path:
-            QMessageBox.warning(
-                self, "Ошибка",
-                "Не указан путь к библиотеке.",
-            )
+            QMessageBox.warning(self, "Ошибка", "Не указан путь к библиотеке.")
             return
 
         video_abs = P.abs_from_rel(library_path, chosen["relative_path"])
@@ -648,7 +886,6 @@ class SeriesView(QWidget):
             )
             return
 
-        # 4. Запускаем VLC
         try:
             from player.external import launch_vlc, PlayerError
 
@@ -665,33 +902,24 @@ class SeriesView(QWidget):
                 f"[{episode_id}] VLC запущен для {os.path.basename(video_abs)}"
             )
 
-            # Помечаем эпизод просмотренным
             self.app.db.set_watched(episode_id, True)
             QTimer.singleShot(300, self.refresh)
 
         except PlayerError as e:
-            QMessageBox.critical(
-                self, "Ошибка плеера", str(e),
-            )
+            QMessageBox.critical(self, "Ошибка плеера", str(e))
         except Exception as e:
-            logger.exception(f"Неожиданная ошибка запуска VLC")
+            logger.exception("Неожиданная ошибка запуска VLC")
             QMessageBox.critical(
                 self, "Ошибка", f"Не удалось запустить плеер:\n{e}",
             )
 
     def _pick_file(self, files: list):
-        """
-        Выбирает файл для воспроизведения.
-        Приоритет: совпадение translation_type и translation_lang.
-        Если несколько — спрашиваем пользователя.
-        """
         if not files:
             return None
 
         if len(files) == 1:
             return files[0]
 
-        # Сначала — точное совпадение по типу и языку
         matching = [
             f for f in files
             if (f["translation_type"] or "sub") == self.translation_type
@@ -700,14 +928,11 @@ class SeriesView(QWidget):
         if matching:
             if len(matching) == 1:
                 return matching[0]
-            # Несколько — диалог выбора
             return self._ask_which_file(matching)
 
-        # Если нет точного совпадения — показываем все
         return self._ask_which_file(files)
 
     def _ask_which_file(self, files: list):
-        """Показывает диалог выбора файла (если несколько)."""
         from PySide6.QtWidgets import QInputDialog
 
         items = []
@@ -731,7 +956,7 @@ class SeriesView(QWidget):
         return files[idx]
 
     # ============================================================
-    # Скачивание (без изменений)
+    # Скачивание
     # ============================================================
 
     def _on_download_episode(self, episode_id: int):
@@ -754,6 +979,12 @@ class SeriesView(QWidget):
         result = dialog.get_result()
         if not result:
             return
+
+        # Снимаем метку NEW только после подтверждения диалога. Если
+        # пользователь отменил — ничего не теряем. Без refresh() —
+        # иначе строка пересоздастся прямо во время старта загрузки.
+        if episode_id in self._new_ids_at_open:
+            self._on_unmark_new(episode_id)
 
         self._manager.start(
             api=self.api, db=self.app.db,
@@ -907,5 +1138,86 @@ class SeriesView(QWidget):
             self.app.settings.set_translation_lang_for_series(self.series_id, value)
             self.refresh()
 
+    # ============================================================
+    # Обновление данных тайтла
+    # ============================================================
+
     def _on_refresh_data(self):
-        logger.info(f"Обновление данных тайтла {self.series_id} (в разработке)")
+        if self._is_refreshing:
+            return
+
+        self._is_refreshing = True
+
+        # Статус в progress_label
+        self.progress_label.setText(i18n.tr("series.refreshing"))
+
+        self._refresh_signals = RefreshSignals()
+        self._refresh_signals.done.connect(self._on_refresh_done)
+        self._refresh_signals.error.connect(self._on_refresh_error)
+
+        def worker():
+            try:
+                data = self.api.get_series(self.series_id)
+                if not data or not data.get("id"):
+                    raise RuntimeError("API вернул пустой ответ")
+
+                self.app.db.upsert_series(data)
+                episodes = data.get("episodes") or []
+                if episodes:
+                    self.app.db.upsert_episodes(episodes)
+
+                logger.info(
+                    f"Обновлено {self.series_id}: "
+                    f"{len(episodes)} эпизодов из API"
+                )
+                self._refresh_signals.done.emit()
+            except Exception as e:
+                logger.exception("Ошибка обновления данных")
+                self._refresh_signals.error.emit(str(e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_refresh_done(self):
+        self._is_refreshing = False
+        # Перечитываем series_row — мог поменяться title/описание/episodes_count.
+        self.series_row = self.app.db.get_series(self.series_id)
+        # Если после обновления появились новые серии — обновляем счётчик
+        # и показываем плашку. Раньше счётчик сбрасывался при открытии,
+        # но тут мы уже внутри — новые серии не теряем.
+        self.refresh()
+        self.progress_label.setText(i18n.tr("series.refresh_done"))
+        QTimer.singleShot(2500, self._restore_progress_label)
+
+    def _on_refresh_error(self, error: str):
+        self._is_refreshing = False
+        self.progress_label.setText(
+            i18n.tr("series.refresh_error", error=error)
+        )
+        QTimer.singleShot(4000, self._restore_progress_label)
+
+    def _restore_progress_label(self):
+        """Вернуть progress_label к обычному содержимому."""
+        try:
+            total_eps = len(self.app.db.list_episodes_by_type(self.series_id, "tv"))
+            watched_count = self.app.db.count_watched(self.series_id)
+
+            downloaded = 0
+            files_by_ep = {}
+            for f in self.app.db.list_local_files(self.series_id):
+                files_by_ep.setdefault(f["episode_id"], []).append(f)
+            for ep in self.app.db.list_episodes_by_type(self.series_id, "tv"):
+                files = files_by_ep.get(ep["episode_id"], [])
+                if any(
+                    (f["translation_type"] or "sub") == self.translation_type
+                    and (f["translation_lang"] or "ru") == self.translation_lang
+                    for f in files
+                ):
+                    downloaded += 1
+
+            self.progress_label.setText(
+                f"{i18n.tr('series.watched_progress', watched=watched_count, total=total_eps)}"
+                f"   ·   "
+                f"{i18n.tr('series.downloaded_progress', downloaded=downloaded, total=total_eps)}"
+            )
+        except Exception:
+            logger.exception("Не удалось восстановить progress_label")
