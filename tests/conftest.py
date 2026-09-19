@@ -31,7 +31,6 @@ def _ensure_i18n_loaded():
     """
     i18n.load("ru")
     yield
-    # Ничего не сбрасываем: i18n-тесты сами вызывают load() явно.
 
 
 # ============================================================
@@ -119,8 +118,7 @@ def mock_requests_head(mocker):
 def mock_requests_get_simple(mocker):
     """
     Мок requests.get — отдаёт ровно 1000 байт и корректно работает
-    как контекстный менеджер. Использую простой класс вместо MagicMock,
-    потому что MagicMock некорректно пробрасывает __enter__ и raise_for_status.
+    как контекстный менеджер.
     """
 
     class FakeRaw:
@@ -179,11 +177,59 @@ def qapp_args():
 
 
 @pytest.fixture
+def download_manager():
+    """Настоящий DownloadManager (QObject со сигналами)."""
+    from ui_qt.download_manager import DownloadManager
+    mgr = DownloadManager()
+    yield mgr
+    try:
+        mgr.shutdown(timeout_ms=500)
+    except Exception:
+        pass
+
+
+@pytest.fixture
 def mock_app_for_ui(mocker, db, settings, mock_api):
-    """Мок AnimeLibraryApp — минимально нужный для диалогов."""
+    """
+    Минимальный мок AnimeLibraryApp для диалогов.
+    Без download_manager — только db/settings/api.
+    """
     app = mocker.MagicMock()
     app.db = db
     app.settings = settings
     app.api = mock_api
     app.logger = mocker.MagicMock()
     return app
+
+
+@pytest.fixture
+def mock_app_full(mocker, db, settings, mock_api, download_manager):
+    """
+    Более полный мок app для LibraryView / SeriesView.
+    Содержит download_manager со сигналами и заглушки методов навигации.
+    """
+    app = mocker.MagicMock()
+    app.db = db
+    app.settings = settings
+    app.api = mock_api
+    app.logger = mocker.MagicMock()
+    app.download_manager = download_manager
+
+    # Навигационные методы — просто ничего не делают, но факт вызова ловим.
+    app.show_library = mocker.MagicMock()
+    app.show_series = mocker.MagicMock()
+    app.show_settings = mocker.MagicMock()
+    app.show_add_series = mocker.MagicMock()
+    app.show_onboarding = mocker.MagicMock()
+    return app
+
+
+@pytest.fixture
+def seeded_db(db, sample_series_data, settings, tmp_library):
+    """
+    БД с одним сериалом и двумя эпизодами + library_path в настройках.
+    """
+    db.upsert_series(sample_series_data)
+    db.upsert_episodes(sample_series_data["episodes"])
+    settings.library_path = tmp_library
+    return db
