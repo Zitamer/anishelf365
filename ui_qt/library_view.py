@@ -5,6 +5,7 @@ import os
 import logging
 import shutil
 import threading
+import time
 
 from PySide6.QtCore import Qt, Signal, QObject, QTimer
 from PySide6.QtGui import QPixmap, QAction
@@ -144,10 +145,10 @@ class SeriesTile(QFrame):
 
 
 # ============================================================
-# Сигналы для сканирования
+# Сигналы для фоновых воркеров (скан / проверка обновлений)
 # ============================================================
 
-class ScanSignals(QObject):
+class WorkerSignals(QObject):
     progress = Signal(int, int, int)
     finished = Signal(dict)
     error = Signal(str)
@@ -184,10 +185,28 @@ class LibraryView(QWidget):
         self._scan_signals = None
         self._is_scanning = False
 
+        self._check_signals = None
+        self._is_checking = False
+
         self._downloads_count = 0
 
+        # Первый refresh() откладываем до showEvent — там у viewport уже
+        # будет настоящая ширина. Иначе _calc_columns() вернёт дефолт и
+        # плитки сначала отрисуются «в 2 колонки», а потом моргнут.
+        self._first_refresh_done = False
+
+        # Сколько колонок было при последнем refresh — чтобы не дёргать
+        # перерисовку на каждый пиксель ресайза.
+        self._last_cols = -1
+
         self._build_ui()
-        self.refresh()
+
+    def showEvent(self, event):
+        """Первый показ — отложенный refresh после того, как layout устоится."""
+        super().showEvent(event)
+        if not self._first_refresh_done:
+            self._first_refresh_done = True
+            QTimer.singleShot(0, self.refresh)
 
     # ============================================================
     # Разметка
@@ -349,17 +368,17 @@ class LibraryView(QWidget):
 
         self.scroll.setWidget(self.grid_container)
 
-        self._resize_timer = QTimer()
-        self._resize_timer.setSingleShot(True)
-        self._resize_timer.setInterval(200)
-        self._resize_timer.timeout.connect(self.refresh)
+        # Ловим ресайз viewport — пересчёт колонок делаем мгновенно,
+        # перерисовку — только если число колонок изменилось.
         self.scroll.viewport().installEventFilter(self)
 
         return self.scroll
 
     def eventFilter(self, obj, event):
         if obj is self.scroll.viewport() and event.type() == event.Type.Resize:
-            self._resize_timer.start()
+            new_cols = self._calc_columns()
+            if new_cols != self._last_cols:
+                self.refresh()
         return super().eventFilter(obj, event)
 
     def _make_bottom_bar(self) -> QFrame:
@@ -405,13 +424,13 @@ class LibraryView(QWidget):
     # ============================================================
 
     def refresh(self):
+        self._last_cols = self._calc_columns()
         while self.grid.count():
             item = self.grid.takeAt(0)
             w = item.widget()
             if w:
                 w.deleteLater()
 
-        # Обновляем счётчик игнорируемых
         self.ignored_btn.setText(self._format_ignored_text())
 
         library_path = self.app.settings.library_path
@@ -423,7 +442,6 @@ class LibraryView(QWidget):
         rows = self.app.db.list_series()
         rows = [dict(r) for r in rows]
 
-        # Исключаем игнорируемые тайтлы
         ignored_ids = {r["series_id"] for r in self.app.db.list_ignored()}
         if ignored_ids:
             rows = [r for r in rows if r["series_id"] not in ignored_ids]
@@ -436,7 +454,6 @@ class LibraryView(QWidget):
         rows = self._apply_sort(rows)
 
         if not rows:
-            # Проверяем: вообще есть сериалы или нет
             total_count = len(self.app.db.list_series())
             ignored_count = len(ignored_ids)
 
@@ -452,7 +469,7 @@ class LibraryView(QWidget):
             self.found_label.setText(i18n.tr("library.found", count=0))
             return
 
-        cols = self._calc_columns()
+        cols = self._last_cols
         for i, row in enumerate(rows):
             r, c = divmod(i, cols)
             tile = SeriesTile(
@@ -517,7 +534,9 @@ class LibraryView(QWidget):
         if width < 100:
             width = 1200
 
-        margin = 40
+        # Точная формула: 2*15 (layout margins) + n*tile_w + (n-1)*10 <= width
+        # ⟹ n <= (width - 20) / (tile_w + 10)
+        margin = 20
         step = LIBRARY_TILE_W + 10
         cols = max(1, (width - margin) // step)
         return min(cols, 12)
@@ -567,7 +586,6 @@ class LibraryView(QWidget):
         self.status_label.setText("Очередь загрузок — в разработке…")
 
     def _on_ignored_click(self):
-        """Открывает диалог управления игнорируемыми тайтлами."""
         from ui_qt.dialogs.ignored_dialog import IgnoredSeriesDialog
         dlg = IgnoredSeriesDialog(self, self.app.db)
         dlg.exec()
@@ -669,7 +687,6 @@ class LibraryView(QWidget):
             webbrowser.open(url)
 
     def _ignore_series(self, series_id: int):
-        """Добавляет тайтл в игнор (с подтверждением)."""
         from ui_qt.dialogs.delete_dialog import AddToIgnoreDialog
 
         row = self.app.db.get_series(series_id)
@@ -686,7 +703,6 @@ class LibraryView(QWidget):
         self.refresh()
 
     def _unignore_series(self, series_id: int):
-        """Убирает тайтл из игнора."""
         from ui_qt.dialogs.delete_dialog import ask_yes_no
 
         row = self.app.db.get_series(series_id)
@@ -704,7 +720,6 @@ class LibraryView(QWidget):
         self.refresh()
 
     def _delete_series(self, series_id: int):
-        """Удаляет тайтл из медиатеки."""
         row = self.app.db.get_series(series_id)
         if not row:
             return
@@ -728,7 +743,6 @@ class LibraryView(QWidget):
         delete_files = dlg.should_delete_files()
         add_to_ignore = dlg.should_ignore()
 
-        # 1. Удаляем файлы с диска
         if delete_files:
             library_path = self.app.settings.library_path
             if library_path:
@@ -751,7 +765,6 @@ class LibraryView(QWidget):
                                     error=str(e)),
                         )
 
-        # 2. Удаляем из БД
         try:
             self.app.db.delete_series(series_id)
             logger.info(
@@ -766,7 +779,6 @@ class LibraryView(QWidget):
             )
             return
 
-        # 3. Добавляем в игнор (если выбрано)
         if add_to_ignore and not delete_files:
             self.app.db.add_ignored(
                 series_id, title=title, reason="delete_keep_files"
@@ -794,7 +806,7 @@ class LibraryView(QWidget):
             i18n.tr("library.scanning", current=0, total=0)
         )
 
-        self._scan_signals = ScanSignals()
+        self._scan_signals = WorkerSignals()
         self._scan_signals.progress.connect(self._on_scan_progress)
         self._scan_signals.finished.connect(self._on_scan_finished)
         self._scan_signals.error.connect(self._on_scan_error)
@@ -839,5 +851,86 @@ class LibraryView(QWidget):
         self.scan_btn.setEnabled(True)
         self.status_label.setText(f"Ошибка: {error}")
 
+    # ============================================================
+    # Проверка новых серий (онгоинги)
+    # ============================================================
+
     def _on_check_new(self):
-        self.status_label.setText("Проверка новых серий — в разработке…")
+        if self._is_checking:
+            return
+
+        total_series = len(self.app.db.list_series())
+        if total_series == 0:
+            self.status_label.setText(i18n.tr("library.check_no_series"))
+            return
+
+        self._is_checking = True
+        self.check_btn.setEnabled(False)
+        self.status_label.setText(
+            i18n.tr("library.checking", current=0, total=total_series)
+        )
+
+        self._check_signals = WorkerSignals()
+        self._check_signals.progress.connect(self._on_check_progress)
+        self._check_signals.finished.connect(self._on_check_finished)
+        self._check_signals.error.connect(self._on_check_error)
+
+        def worker():
+            from core.updater import check_for_updates
+            try:
+                stats = check_for_updates(
+                    self.app.db, self.api,
+                    progress_cb=lambda c, t, sid: self._check_signals.progress.emit(c, t, sid),
+                )
+                self._check_signals.finished.emit(stats.to_dict())
+            except Exception as e:
+                self._check_signals.error.emit(str(e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_check_progress(self, current: int, total: int, sid: int):
+        self.status_label.setText(
+            i18n.tr("library.checking", current=current, total=total)
+        )
+
+    def _on_check_finished(self, stats: dict):
+        self._is_checking = False
+        self.check_btn.setEnabled(True)
+
+        self.app.settings.last_check_time = time.time()
+
+        new_total = stats.get("new_episodes_total", 0)
+        series_with_new = stats.get("series_with_new", 0)
+        failed = stats.get("series_failed", 0)
+
+        if new_total > 0:
+            self.status_label.setText(
+                i18n.tr(
+                    "library.check_done",
+                    new=new_total,
+                    series=series_with_new,
+                )
+            )
+        else:
+            self.status_label.setText(i18n.tr("library.check_no_new"))
+
+        if failed:
+            self.status_label.setText(
+                self.status_label.text()
+                + f"  ({failed} ошибок)"
+            )
+
+        logger.info(
+            f"Проверка завершена: проверено {stats.get('series_checked', 0)}, "
+            f"новых {new_total}, тайтлов с новыми {series_with_new}"
+        )
+
+        self.refresh()
+
+    def _on_check_error(self, error: str):
+        self._is_checking = False
+        self.check_btn.setEnabled(True)
+        self.status_label.setText(
+            i18n.tr("library.check_error", error=error)
+        )
+        logger.error(f"Проверка новых серий упала: {error}")

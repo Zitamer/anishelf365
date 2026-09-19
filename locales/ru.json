@@ -63,6 +63,11 @@
     "library.scanning": "Сканирование… {current}/{total}",
     "library.no_series": "В библиотеке пока ничего нет. Нажмите «Обновить библиотеку».",
     "library.no_library_path": "Путь к библиотеке не задан.\nОткройте настройки и укажите папку.",
+    "library.checking": "Проверка обновлений… {current}/{total}",
+    "library.check_done": "Готово: новых серий — {new}, тайтлов с новыми — {series}",
+    "library.check_no_new": "Новых серий нет",
+    "library.check_no_series": "В библиотеке пока нет тайтлов для проверки.",
+    "library.check_error": "Ошибка проверки: {error}",
 
     "series.back": "← Назад",
     "series.continue_from": "▶ Продолжить с {number} серии",

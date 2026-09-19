@@ -63,6 +63,11 @@
     "library.scanning": "Scanning… {current}/{total}",
     "library.no_series": "Library is empty. Click \"Refresh library\".",
     "library.no_library_path": "Library path is not set.\nOpen Settings and specify a folder.",
+    "library.checking": "Checking for updates… {current}/{total}",
+    "library.check_done": "Done: new episodes — {new}, titles with new — {series}",
+    "library.check_no_new": "No new episodes",
+    "library.check_no_series": "Library is empty — nothing to check.",
+    "library.check_error": "Check failed: {error}",
 
     "series.back": "← Back",
     "series.continue_from": "▶ Continue from episode {number}",

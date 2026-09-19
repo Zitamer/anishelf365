@@ -244,6 +244,10 @@ class SeriesView(QWidget):
             self._build_not_found()
             return
 
+        # Пользователь открыл тайтл — сбрасываем счётчик «новых» для плитки.
+        if (self.series_row["new_episodes_count"] or 0) > 0:
+            self.app.db.reset_new_episodes_count(series_id)
+
         self.translation_type = self.app.settings.get_translation_type_for_series(series_id)
         self.translation_lang = self.app.settings.get_translation_lang_for_series(series_id)
         self.episodes_view = "list"
