@@ -6,10 +6,13 @@ import os
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
-from core.constants import BASE_DIR
+from core.constants import BUNDLE_DIR
 
 
-STYLES_DIR = os.path.join(BASE_DIR, "ui_qt", "styles")
+# Ресурсы (QSS) читаются из bundle:
+#   - из исходников: корень проекта
+#   - из .exe (PyInstaller): _MEIPASS (= dist/AniShelf365/_internal)
+STYLES_DIR = os.path.join(BUNDLE_DIR, "ui_qt", "styles")
 
 
 def _read_qss(name: str) -> str:

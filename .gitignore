@@ -28,6 +28,7 @@ env/
 
 # PyInstaller
 *.spec
+!anishelf365.spec
 
 # IDEs and editors
 .vscode/

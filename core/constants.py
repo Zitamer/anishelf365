@@ -30,14 +30,23 @@ VLC_DOWNLOAD_PAGE = "https://www.videolan.org/vlc/"
 
 # ---------- Пути ----------
 if getattr(sys, "frozen", False):
+    # Запущены из собранного .exe (PyInstaller).
+    #   sys._MEIPASS — папка со встроенными ресурсами
+    #                  (dist/AniShelf365/_internal для onedir)
+    #   sys.executable — путь к .exe, рядом с ним лежит data/
+    BUNDLE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
     BASE_DIR = os.path.dirname(sys.executable)
 else:
-    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    BUNDLE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    BASE_DIR = BUNDLE_DIR
 
+# Данные пишутся рядом с .exe (в из исходников — в корне проекта).
 DATA_DIR = os.path.join(BASE_DIR, "data")
 COVERS_DIR = os.path.join(DATA_DIR, "covers")
-LOCALES_DIR = os.path.join(BASE_DIR, "locales")
-ASSETS_DIR = os.path.join(BASE_DIR, "assets")
+
+# Ресурсы читаются из bundle (в .exe они упакованы в _internal).
+LOCALES_DIR = os.path.join(BUNDLE_DIR, "locales")
+ASSETS_DIR = os.path.join(BUNDLE_DIR, "assets")
 
 DB_PATH = os.path.join(DATA_DIR, "library.db")
 TOKEN_PATH = os.path.join(DATA_DIR, "token.json")
